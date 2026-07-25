@@ -1,0 +1,26 @@
+[package]
+name = "wallpicker"
+version = "0.1.0"
+edition = "2021"
+description = "GTK4 wallpaper picker untuk Hyprland/Niri, integrasi dengan awww-daemon"
+
+[[bin]]
+name = "wallpicker"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", package = "gtk4", features = ["v4_10"] }
+glib = "0.20"
+gio = "0.20"
+image = "0.25"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+anyhow = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

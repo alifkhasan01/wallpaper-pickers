@@ -1,0 +1,95 @@
+use anyhow::{bail, Result};
+use std::fs;
+use std::os::unix::fs as unix_fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
+
+use crate::config::Config;
+
+fn cache_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".cache")
+        .join("wallpaper")
+}
+
+fn write_cache(path: &Path) -> Result<()> {
+    let dir = cache_dir();
+    fs::create_dir_all(&dir)?;
+
+    let current = dir.join("current");
+    fs::write(&current, path.to_string_lossy().as_bytes())?;
+
+    let link = dir.join("hyprlock-bg");
+    let _ = fs::remove_file(&link);
+    unix_fs::symlink(path, &link)?;
+
+    Ok(())
+}
+
+pub fn ensure_daemon_running() -> Result<()> {
+    let status = Command::new("awww")
+        .arg("query")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let running = matches!(status, Ok(s) if s.success());
+
+    if !running {
+        Command::new("awww-daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        thread::sleep(Duration::from_millis(400));
+    }
+
+    Ok(())
+}
+
+pub fn set_wallpaper(path: &Path, cfg: &Config) -> Result<()> {
+    ensure_daemon_running()?;
+
+    let output = Command::new("awww")
+        .arg("img")
+        .arg(path)
+        .arg("--transition-type")
+        .arg(&cfg.transition_type)
+        .arg("--transition-duration")
+        .arg(cfg.transition_duration.to_string())
+        .arg("--transition-fps")
+        .arg(cfg.transition_fps.to_string())
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("awww gagal set wallpaper: {}", stderr.trim());
+    }
+
+    write_cache(path)?;
+
+    Ok(())
+}
+
+pub fn check_binaries_available() -> Result<()> {
+    for bin in ["awww", "awww-daemon"] {
+        let found = Command::new("which")
+            .arg(bin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !found {
+            bail!(
+                "Binary `{}` tidak ketemu di PATH. Install awww dulu (AUR: awww, atau awww-git).",
+                bin
+            );
+        }
+    }
+    Ok(())
+}
