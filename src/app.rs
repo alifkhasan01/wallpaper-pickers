@@ -1,16 +1,18 @@
+use glib::object::ObjectExt;
 use gtk4::glib::clone;
 use gtk4::prelude::*;
 use gtk4::{
-    gio, glib, Align, Application, ApplicationWindow, Box as GtkBox, Button, Entry, FlowBox,
-    FlowBoxChild, HeaderBar, Image, Label, Orientation, Overlay, PolicyType, ScrolledWindow,
-    SelectionMode, SpinButton, Spinner, StringList,
+    gio, glib, Align, Application, ApplicationWindow, Box as GtkBox, Button, Entry,
+    GridView, HeaderBar, Image, Label, ListItem, Orientation, Overlay, PolicyType,
+    ScrolledWindow, SignalListItemFactory, SingleSelection, SpinButton, Spinner,
+    StringList, ToggleButton,
 };
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::config::Config;
-use crate::wallpaper::{self, WallpaperEntry};
+use crate::wallpaper::{self, WallpaperEntry, WallpaperEntryObject};
 use crate::awww;
 
 pub fn build_ui(app: &Application) {
@@ -44,8 +46,17 @@ pub fn build_ui(app: &Application) {
     random_btn.set_tooltip_text(Some("Wallpaper acak"));
     header.pack_end(&random_btn);
 
+    let slideshow_btn = ToggleButton::new();
+    slideshow_btn.set_icon_name("media-playlist-repeat-symbolic");
+    slideshow_btn.set_tooltip_text(Some("Slide otomatis"));
+    slideshow_btn.set_active(config.borrow().slideshow_enabled);
+    if config.borrow().slideshow_enabled {
+        slideshow_btn.add_css_class("suggested-action");
+    }
+    header.pack_end(&slideshow_btn);
+
     let settings_btn = Button::from_icon_name("emblem-system-symbolic");
-    settings_btn.set_tooltip_text(Some("Pengaturan transisi"));
+    settings_btn.set_tooltip_text(Some("Pengaturan"));
     header.pack_end(&settings_btn);
 
     window.set_titlebar(Some(&header));
@@ -58,43 +69,169 @@ pub fn build_ui(app: &Application) {
         .vexpand(true)
         .build();
 
-    let flowbox = FlowBox::builder()
-        .valign(Align::Start)
-        .selection_mode(SelectionMode::None)
-        .homogeneous(true)
-        .row_spacing(8)
-        .column_spacing(8)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
-
-    scrolled.set_child(Some(&flowbox));
-    root.append(&scrolled);
-
-    // Status bar bawah
+    // Status bar bawah (dibuat dulu agar bisa di-capture factory closure)
     let status_bar = GtkBox::new(Orientation::Horizontal, 8);
     status_bar.set_margin_top(6);
     status_bar.set_margin_bottom(6);
     status_bar.set_margin_start(12);
     status_bar.set_margin_end(12);
 
-    let status_label = Label::new(Some("Siap."));
+    let status_label = Rc::new(Label::new(Some("Siap.")));
     status_label.set_halign(Align::Start);
     status_label.set_hexpand(true);
 
-    let spinner = Spinner::new();
-    status_bar.append(&status_label);
-    status_bar.append(&spinner);
+    let spinner = Rc::new(Spinner::new());
+    status_bar.append(status_label.as_ref());
+    status_bar.append(spinner.as_ref());
+
+    // GridView dengan widget recycling — hanya item terlihat yang dialokasikan
+    let model: gio::ListStore = gio::ListStore::new::<WallpaperEntryObject>();
+    let model = Rc::new(model);
+
+    let factory = SignalListItemFactory::new();
+
+    // setup: dipanggil sekali per ListItem (widget dibuat, lalu di-recycle)
+    factory.connect_setup(|_, item| {
+        let list_item = item.downcast_ref::<ListItem>().unwrap();
+
+        let image = Image::new();
+        image.set_pixel_size(180);
+
+        let overlay = Overlay::new();
+        overlay.set_child(Some(&image));
+
+        let button = Button::builder()
+            .child(&overlay)
+            .css_classes(vec!["flat".to_string()])
+            .build();
+
+        let card = GtkBox::new(Orientation::Vertical, 4);
+        card.set_width_request(180);
+        card.append(&button);
+
+        let label = Label::new(None);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        label.set_max_width_chars(20);
+        label.set_lines(1);
+        card.append(&label);
+
+        list_item.set_child(Some(&card));
+    });
+
+    // bind: dipanggil setiap kali item muncul/berubah di viewport
+    factory.connect_bind(|_, item| {
+        let list_item = item.downcast_ref::<ListItem>().unwrap();
+
+        if let Some(entry) = list_item.item()
+            .as_ref()
+            .and_then(|o| o.downcast_ref::<WallpaperEntryObject>())
+        {
+            if let Some(child) = list_item.child() {
+                if let Some(card) = child.downcast_ref::<GtkBox>() {
+                    // card children: [button (overlay + image), label]
+                    let thumb_path = entry.thumb_path();
+                    if let Some(button) = card.first_child()
+                        .and_then(|c| c.downcast::<Button>().ok())
+                    {
+                        if let Some(overlay) = button.child()
+                            .and_then(|c| c.downcast::<Overlay>().ok())
+                        {
+                            if let Some(image) = overlay.child()
+                                .and_then(|c| c.downcast::<Image>().ok())
+                            {
+                                image.set_from_file(Some(&thumb_path));
+                            }
+                        }
+                        // Simpan path di button untuk click handler
+                        let path_str = entry.full_path().to_string_lossy().to_string();
+                        unsafe { button.set_data("entry-path", path_str); }
+                    }
+                    if let Some(second) = card.first_child()
+                        .and_then(|c| c.next_sibling())
+                    {
+                        if let Some(label) = second.downcast_ref::<Label>() {
+                            label.set_text(&entry.file_name());
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Click handler pada setup (dipasang sekali, di-recycle bersama widget)
+    factory.connect_setup(clone!(
+        #[strong] status_label,
+        #[strong] config,
+        move |_, item| {
+            let list_item = item.downcast_ref::<ListItem>().unwrap();
+
+            if let Some(child) = list_item.child() {
+                if let Some(card) = child.downcast_ref::<GtkBox>() {
+                    if let Some(button) = card.first_child()
+                        .and_then(|c| c.downcast::<Button>().ok())
+                    {
+                        button.connect_clicked(clone!(
+                            #[strong] status_label,
+                            #[strong] config,
+                            move |btn| {
+                                // Ambil path dari data button (diset di bind)
+                                let path = unsafe {
+                                    btn.steal_data::<String>("entry-path")
+                                        .map(|s| PathBuf::from(s))
+                                };
+
+                                if let Some(path) = path {
+                                    let cfg = config.borrow().clone();
+                                    status_label.set_text(&format!("Menerapkan {}...", path.display()));
+
+                                    glib::MainContext::default().spawn_local(clone!(
+                                        #[strong] status_label,
+                                        async move {
+                                            let path_for_thread = path.clone();
+                                            let result = gio::spawn_blocking(move || {
+                                                awww::set_wallpaper(&path_for_thread, &cfg)
+                                            }).await;
+
+                                            match result {
+                                                Ok(Ok(())) => {
+                                                    status_label.set_text(&format!(
+                                                        "✓ Wallpaper diset: {}",
+                                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                                    ));
+                                                }
+                                                Ok(Err(e)) => {
+                                                    status_label.set_text(&format!("⚠ Gagal set wallpaper: {}", e));
+                                                }
+                                                Err(_) => {
+                                                    status_label.set_text("⚠ Gagal set wallpaper (thread error).");
+                                                }
+                                            }
+                                        }
+                                    ));
+                                }
+                            }
+                        ));
+                    }
+                }
+            }
+        }
+    ));
+
+    let selection = SingleSelection::new(Some((*model).clone()));
+    let grid_view = GridView::builder()
+        .model(&selection)
+        .factory(&factory)
+        .max_columns(6)
+        .build();
+
+    scrolled.set_child(Some(&grid_view));
+    root.append(&scrolled);
     root.append(&status_bar);
 
     window.set_child(Some(&root));
 
-    let flowbox = Rc::new(flowbox);
-    let status_label = Rc::new(status_label);
-    let spinner = Rc::new(spinner);
     let wallpapers: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+    let slideshow_source: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
     // Cek binary awww ada atau tidak, kasih tau di status bar kalau tidak ada
     if let Err(e) = awww::check_binaries_available() {
@@ -103,7 +240,7 @@ pub fn build_ui(app: &Application) {
 
     // Muat grid pertama kali
     reload_grid(
-        flowbox.clone(),
+        model.clone(),
         config.clone(),
         status_label.clone(),
         spinner.clone(),
@@ -111,34 +248,89 @@ pub fn build_ui(app: &Application) {
         None,
     );
 
+    // Auto-start slideshow jika sebelumnya aktif
+    if config.borrow().slideshow_enabled {
+        let interval_secs = config.borrow().slideshow_interval_minutes * 60;
+        let sid = glib::timeout_add_seconds_local(
+            interval_secs,
+            clone!(
+                #[strong] config,
+                #[strong] wallpapers,
+                #[strong] status_label,
+                move || {
+                    let list = wallpapers.borrow();
+                    if list.is_empty() {
+                        return glib::ControlFlow::Continue;
+                    }
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos() as usize;
+                    let path = list[nanos % list.len()].clone();
+                    let cfg = config.borrow().clone();
+                    drop(list);
+
+                    status_label.set_text(&format!("🔄 Slide: {}...", path.display()));
+
+                    glib::MainContext::default().spawn_local(clone!(
+                        #[strong] status_label,
+                        async move {
+                            let path_for_thread = path.clone();
+                            let result = gio::spawn_blocking(move || {
+                                awww::set_wallpaper(&path_for_thread, &cfg)
+                            }).await;
+                            match result {
+                                Ok(Ok(())) => {
+                                    status_label.set_text(&format!(
+                                        "✓ Slide: {}",
+                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                    ));
+                                }
+                                Ok(Err(e)) => {
+                                    status_label.set_text(&format!("⚠ Slide gagal: {}", e));
+                                }
+                                Err(_) => {
+                                    status_label.set_text("⚠ Slide gagal (thread error).");
+                                }
+                            }
+                        }
+                    ));
+
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+        *slideshow_source.borrow_mut() = Some(sid);
+    }
+
     // ---------- Signal handlers ----------
 
     refresh_btn.connect_clicked(clone!(
-        #[strong] flowbox,
+        #[strong] model,
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
         #[strong] wallpapers,
         move |_| {
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
         }
     ));
 
     search_entry.connect_changed(clone!(
-        #[strong] flowbox,
+        #[strong] model,
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
         #[strong] wallpapers,
         move |entry| {
             let query = entry.text().to_string();
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), Some(query));
+            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), Some(query));
         }
     ));
 
     folder_btn.connect_clicked(clone!(
         #[strong] window,
-        #[strong] flowbox,
+        #[strong] model,
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
@@ -152,7 +344,7 @@ pub fn build_ui(app: &Application) {
                 Some(&window),
                 gio::Cancellable::NONE,
                 clone!(
-                    #[strong] flowbox,
+                    #[strong] model,
                     #[strong] config,
                     #[strong] status_label,
                     #[strong] spinner,
@@ -162,7 +354,7 @@ pub fn build_ui(app: &Application) {
                             if let Some(path) = folder.path() {
                                 config.borrow_mut().wallpaper_dir = path.to_string_lossy().to_string();
                                 let _ = config.borrow().save();
-                                reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+                                reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
                             }
                         }
                     }
@@ -171,15 +363,132 @@ pub fn build_ui(app: &Application) {
         }
     ));
 
+    slideshow_btn.connect_toggled(clone!(
+        #[strong] config,
+        #[strong] wallpapers,
+        #[strong] status_label,
+        #[strong] slideshow_source,
+        move |btn| {
+            let enabled = btn.is_active();
+            if enabled {
+                btn.add_css_class("suggested-action");
+            } else {
+                btn.remove_css_class("suggested-action");
+            }
+            config.borrow_mut().slideshow_enabled = enabled;
+            let _ = config.borrow().save();
+
+            if enabled {
+                let list = wallpapers.borrow();
+                if !list.is_empty() {
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos() as usize;
+                    let path = list[nanos % list.len()].clone();
+                    let cfg = config.borrow().clone();
+                    drop(list);
+
+                    status_label.set_text(&format!("🔄 Slide: {}...", path.display()));
+
+                    glib::MainContext::default().spawn_local(clone!(
+                        #[strong] status_label,
+                        async move {
+                            let path_for_thread = path.clone();
+                            let result = gio::spawn_blocking(move || {
+                                awww::set_wallpaper(&path_for_thread, &cfg)
+                            }).await;
+                            match result {
+                                Ok(Ok(())) => {
+                                    status_label.set_text(&format!(
+                                        "✓ Slide: {}",
+                                        path.file_name().unwrap_or_default().to_string_lossy()
+                                    ));
+                                }
+                                Ok(Err(e)) => {
+                                    status_label.set_text(&format!("⚠ Slide gagal: {}", e));
+                                }
+                                Err(_) => {
+                                    status_label.set_text("⚠ Slide gagal (thread error).");
+                                }
+                            }
+                        }
+                    ));
+                }
+
+                let interval_secs = config.borrow().slideshow_interval_minutes * 60;
+                let sid = glib::timeout_add_seconds_local(
+                    interval_secs,
+                    clone!(
+                        #[strong] config,
+                        #[strong] wallpapers,
+                        #[strong] status_label,
+                        move || {
+                            let list = wallpapers.borrow();
+                            if list.is_empty() {
+                                return glib::ControlFlow::Continue;
+                            }
+                            let nanos = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .subsec_nanos() as usize;
+                            let path = list[nanos % list.len()].clone();
+                            let cfg = config.borrow().clone();
+                            drop(list);
+
+                            status_label.set_text(&format!("🔄 Slide: {}...", path.display()));
+
+                            glib::MainContext::default().spawn_local(clone!(
+                                #[strong] status_label,
+                                async move {
+                                    let path_for_thread = path.clone();
+                                    let result = gio::spawn_blocking(move || {
+                                        awww::set_wallpaper(&path_for_thread, &cfg)
+                                    }).await;
+                                    match result {
+                                        Ok(Ok(())) => {
+                                            status_label.set_text(&format!(
+                                                "✓ Slide: {}",
+                                                path.file_name().unwrap_or_default().to_string_lossy()
+                                            ));
+                                        }
+                                        Ok(Err(e)) => {
+                                            status_label.set_text(&format!("⚠ Slide gagal: {}", e));
+                                        }
+                                        Err(_) => {
+                                            status_label.set_text("⚠ Slide gagal (thread error).");
+                                        }
+                                    }
+                                }
+                            ));
+
+                            glib::ControlFlow::Continue
+                        }
+                    ),
+                );
+                *slideshow_source.borrow_mut() = Some(sid);
+            } else {
+                if let Some(sid) = slideshow_source.borrow_mut().take() {
+                    sid.remove();
+                }
+            }
+        }
+    ));
+
     settings_btn.connect_clicked(clone!(
         #[strong] window,
+        #[strong] model,
         #[strong] config,
-        #[strong] flowbox,
         #[strong] status_label,
         #[strong] spinner,
         #[strong] wallpapers,
+        #[strong] slideshow_source,
+        #[strong] slideshow_btn,
         move |_| {
-            open_settings_dialog(&window, config.clone(), flowbox.clone(), status_label.clone(), spinner.clone(), wallpapers.clone());
+            open_settings_dialog(
+                &window, model.clone(), config.clone(), status_label.clone(),
+                spinner.clone(), wallpapers.clone(), slideshow_source.clone(), slideshow_btn.clone(),
+            );
         }
     ));
 
@@ -237,15 +546,17 @@ pub fn build_ui(app: &Application) {
 const BATCH_SIZE: usize = 50;
 
 fn reload_grid(
-    flowbox: Rc<FlowBox>,
+    model: Rc<gio::ListStore>,
     config: Rc<RefCell<Config>>,
     status_label: Rc<Label>,
     spinner: Rc<Spinner>,
     wallpapers: Rc<RefCell<Vec<PathBuf>>>,
     query: Option<String>,
 ) {
-    while let Some(child) = flowbox.first_child() {
-        flowbox.remove(&child);
+    // Kosongkan model — GridView otomatis merespon perubahan
+    if model.n_items() > 0 {
+        let empty: &[WallpaperEntryObject] = &[];
+        model.splice(0, model.n_items(), empty);
     }
 
     let dir = config.borrow().wallpaper_dir.clone();
@@ -256,10 +567,9 @@ fn reload_grid(
     spinner.set_visible(true);
 
     glib::MainContext::default().spawn_local(clone!(
-        #[strong] flowbox,
+        #[strong] model,
         #[strong] status_label,
         #[strong] spinner,
-        #[strong] config,
         #[strong] wallpapers,
         async move {
             let scan = gio::spawn_blocking(move || wallpaper::scan_wallpapers(&dir)).await;
@@ -318,8 +628,7 @@ fn reload_grid(
                 loaded += entries.len();
 
                 for entry in &entries {
-                    let child = build_wallpaper_card(entry, config.clone(), status_label.clone());
-                    flowbox.insert(&child, -1);
+                    model.append(&WallpaperEntryObject::new(entry));
                 }
 
                 status_label.set_text(&format!("Memuat {}/{}...", loaded, total));
@@ -332,85 +641,16 @@ fn reload_grid(
     ));
 }
 
-/// Bikin satu kartu wallpaper (thumbnail + nama file) di dalam FlowBox.
-fn build_wallpaper_card(
-    entry: &WallpaperEntry,
-    config: Rc<RefCell<Config>>,
-    status_label: Rc<Label>,
-) -> FlowBoxChild {
-    let card = GtkBox::new(Orientation::Vertical, 4);
-    card.set_width_request(180);
-
-    let image = Image::from_file(&entry.thumb_path);
-    image.set_pixel_size(180);
-    image.set_valign(Align::Start);
-
-    let overlay = Overlay::new();
-    overlay.set_child(Some(&image));
-
-    let button = Button::builder()
-        .child(&overlay)
-        .css_classes(vec!["flat".to_string()])
-        .build();
-
-    let label = Label::new(Some(&entry.file_name));
-    label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-    label.set_max_width_chars(20);
-    label.set_lines(1);
-
-    card.append(&button);
-    card.append(&label);
-
-    let path = entry.full_path.clone();
-    button.connect_clicked(clone!(
-        #[strong] status_label,
-        #[strong] config,
-        move |_| {
-            let path = path.clone();
-            let cfg = config.borrow().clone();
-            status_label.set_text(&format!("Menerapkan {}...", path.display()));
-
-            glib::MainContext::default().spawn_local(clone!(
-                #[strong] status_label,
-                async move {
-                    let path_for_thread = path.clone();
-                    let result = gio::spawn_blocking(move || {
-                        awww::set_wallpaper(&path_for_thread, &cfg)
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(())) => {
-                            status_label.set_text(&format!(
-                                "✓ Wallpaper diset: {}",
-                                path.file_name().unwrap_or_default().to_string_lossy()
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            status_label.set_text(&format!("⚠ Gagal set wallpaper: {}", e));
-                        }
-                        Err(_) => {
-                            status_label.set_text("⚠ Gagal set wallpaper (thread error).");
-                        }
-                    }
-                }
-            ));
-        }
-    ));
-
-    let flow_child = FlowBoxChild::new();
-    flow_child.set_child(Some(&card));
-    flow_child
-}
-
-/// Dialog pengaturan transisi awww + ukuran thumbnail.
+/// Dialog pengaturan transisi awww + ukuran thumbnail + slide.
 fn open_settings_dialog(
     parent: &ApplicationWindow,
+    model: Rc<gio::ListStore>,
     config: Rc<RefCell<Config>>,
-    flowbox: Rc<FlowBox>,
     status_label: Rc<Label>,
     spinner: Rc<Spinner>,
     wallpapers: Rc<RefCell<Vec<PathBuf>>>,
+    slideshow_source: Rc<RefCell<Option<glib::SourceId>>>,
+    slideshow_btn: ToggleButton,
 ) {
     let dialog = gtk4::Window::builder()
         .transient_for(parent)
@@ -468,6 +708,15 @@ fn open_settings_dialog(
     thumb_row.append(&thumb_spin);
     content.append(&thumb_row);
 
+    // Slideshow interval
+    let slide_row = GtkBox::new(Orientation::Horizontal, 8);
+    slide_row.append(&Label::new(Some("Interval slide (menit):")));
+    let slide_spin = SpinButton::with_range(1.0, 120.0, 1.0);
+    slide_spin.set_value(config.borrow().slideshow_interval_minutes as f64);
+    slide_spin.set_hexpand(true);
+    slide_row.append(&slide_spin);
+    content.append(&slide_row);
+
     let save_btn = Button::with_label("Simpan");
     save_btn.add_css_class("suggested-action");
     content.append(&save_btn);
@@ -477,11 +726,14 @@ fn open_settings_dialog(
     save_btn.connect_clicked(clone!(
         #[strong] config,
         #[strong] dialog,
-        #[strong] flowbox,
+        #[strong] model,
         #[strong] status_label,
         #[strong] spinner,
         #[strong] wallpapers,
+        #[strong] slideshow_source,
+        #[strong] slideshow_btn,
         move |_| {
+            let interval_changed;
             {
                 let mut cfg = config.borrow_mut();
                 let selected = type_dropdown.selected();
@@ -492,9 +744,71 @@ fn open_settings_dialog(
                 cfg.transition_duration = dur_spin.value() as f32;
                 cfg.transition_fps = fps_spin.value() as u32;
                 cfg.thumb_size = thumb_spin.value() as u32;
+                let new_interval = slide_spin.value() as u32;
+                interval_changed = new_interval != cfg.slideshow_interval_minutes;
+                cfg.slideshow_interval_minutes = new_interval;
                 let _ = cfg.save();
             }
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+
+            // Restart timer jika interval berubah dan slideshow aktif
+            if interval_changed && slideshow_btn.is_active() {
+                if let Some(sid) = slideshow_source.borrow_mut().take() {
+                    sid.remove();
+                }
+                let interval_secs = config.borrow().slideshow_interval_minutes * 60;
+                let sid = glib::timeout_add_seconds_local(
+                    interval_secs,
+                    clone!(
+                        #[strong] config,
+                        #[strong] wallpapers,
+                        #[strong] status_label,
+                        move || {
+                            let list = wallpapers.borrow();
+                            if list.is_empty() {
+                                return glib::ControlFlow::Continue;
+                            }
+                            let nanos = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .subsec_nanos() as usize;
+                            let path = list[nanos % list.len()].clone();
+                            let cfg = config.borrow().clone();
+                            drop(list);
+
+                            status_label.set_text(&format!("🔄 Slide: {}...", path.display()));
+
+                            glib::MainContext::default().spawn_local(clone!(
+                                #[strong] status_label,
+                                async move {
+                                    let path_for_thread = path.clone();
+                                    let result = gio::spawn_blocking(move || {
+                                        awww::set_wallpaper(&path_for_thread, &cfg)
+                                    }).await;
+                                    match result {
+                                        Ok(Ok(())) => {
+                                            status_label.set_text(&format!(
+                                                "✓ Slide: {}",
+                                                path.file_name().unwrap_or_default().to_string_lossy()
+                                            ));
+                                        }
+                                        Ok(Err(e)) => {
+                                            status_label.set_text(&format!("⚠ Slide gagal: {}", e));
+                                        }
+                                        Err(_) => {
+                                            status_label.set_text("⚠ Slide gagal (thread error).");
+                                        }
+                                    }
+                                }
+                            ));
+
+                            glib::ControlFlow::Continue
+                        }
+                    ),
+                );
+                *slideshow_source.borrow_mut() = Some(sid);
+            }
+
             dialog.close();
         }
     ));

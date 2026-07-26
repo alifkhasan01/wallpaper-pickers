@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use glib::subclass::types::ObjectSubclassIsExt;
 use image::imageops::FilterType;
 use image::ImageFormat;
 use sha2::{Digest, Sha256};
@@ -17,6 +18,54 @@ pub struct WallpaperEntry {
     pub full_path: PathBuf,
     pub file_name: String,
     pub thumb_path: PathBuf,
+}
+
+mod imp {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    use glib::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct WallpaperEntryObject {
+        pub full_path: RefCell<PathBuf>,
+        pub file_name: RefCell<String>,
+        pub thumb_path: RefCell<PathBuf>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for WallpaperEntryObject {
+        const NAME: &'static str = "WallpaperEntryObject";
+        type Type = super::WallpaperEntryObject;
+    }
+
+    impl ObjectImpl for WallpaperEntryObject {}
+}
+
+glib::wrapper! {
+    pub struct WallpaperEntryObject(ObjectSubclass<imp::WallpaperEntryObject>);
+}
+
+impl WallpaperEntryObject {
+    pub fn new(entry: &WallpaperEntry) -> Self {
+        let obj: Self = glib::Object::new();
+        obj.imp().full_path.replace(entry.full_path.clone());
+        obj.imp().file_name.replace(entry.file_name.clone());
+        obj.imp().thumb_path.replace(entry.thumb_path.clone());
+        obj
+    }
+
+    pub fn full_path(&self) -> PathBuf {
+        self.imp().full_path.borrow().clone()
+    }
+
+    pub fn file_name(&self) -> String {
+        self.imp().file_name.borrow().clone()
+    }
+
+    pub fn thumb_path(&self) -> PathBuf {
+        self.imp().thumb_path.borrow().clone()
+    }
 }
 
 pub fn scan_wallpapers(dir: &str) -> Result<Vec<PathBuf>> {

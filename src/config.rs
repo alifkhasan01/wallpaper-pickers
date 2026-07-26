@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// Folder tempat wallpaper disimpan
     pub wallpaper_dir: String,
@@ -17,6 +18,10 @@ pub struct Config {
     pub thumb_size: u32,
     /// Jumlah kolom grid
     pub columns: u32,
+    /// Slide otomatis aktif/nonaktif
+    pub slideshow_enabled: bool,
+    /// Interval slide (menit)
+    pub slideshow_interval_minutes: u32,
 }
 
 impl Default for Config {
@@ -34,6 +39,8 @@ impl Default for Config {
             transition_fps: 60,
             thumb_size: 220,
             columns: 4,
+            slideshow_enabled: false,
+            slideshow_interval_minutes: 5,
         }
     }
 }
