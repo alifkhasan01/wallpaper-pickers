@@ -6,6 +6,7 @@ use gtk4::{
     SelectionMode, SpinButton, Spinner, StringList,
 };
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::config::Config;
@@ -38,6 +39,10 @@ pub fn build_ui(app: &Application) {
     let folder_btn = Button::from_icon_name("folder-open-symbolic");
     folder_btn.set_tooltip_text(Some("Pilih folder wallpaper"));
     header.pack_start(&folder_btn);
+
+    let random_btn = Button::from_icon_name("media-playlist-shuffle-symbolic");
+    random_btn.set_tooltip_text(Some("Wallpaper acak"));
+    header.pack_end(&random_btn);
 
     let settings_btn = Button::from_icon_name("emblem-system-symbolic");
     settings_btn.set_tooltip_text(Some("Pengaturan transisi"));
@@ -89,6 +94,7 @@ pub fn build_ui(app: &Application) {
     let flowbox = Rc::new(flowbox);
     let status_label = Rc::new(status_label);
     let spinner = Rc::new(spinner);
+    let wallpapers: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
 
     // Cek binary awww ada atau tidak, kasih tau di status bar kalau tidak ada
     if let Err(e) = awww::check_binaries_available() {
@@ -101,6 +107,7 @@ pub fn build_ui(app: &Application) {
         config.clone(),
         status_label.clone(),
         spinner.clone(),
+        wallpapers.clone(),
         None,
     );
 
@@ -111,8 +118,9 @@ pub fn build_ui(app: &Application) {
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
+        #[strong] wallpapers,
         move |_| {
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), None);
+            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
         }
     ));
 
@@ -121,9 +129,10 @@ pub fn build_ui(app: &Application) {
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
+        #[strong] wallpapers,
         move |entry| {
             let query = entry.text().to_string();
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), Some(query));
+            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), Some(query));
         }
     ));
 
@@ -133,6 +142,7 @@ pub fn build_ui(app: &Application) {
         #[strong] config,
         #[strong] status_label,
         #[strong] spinner,
+        #[strong] wallpapers,
         move |_| {
             let dialog = gtk4::FileDialog::builder()
                 .title("Pilih folder wallpaper")
@@ -146,12 +156,13 @@ pub fn build_ui(app: &Application) {
                     #[strong] config,
                     #[strong] status_label,
                     #[strong] spinner,
+                    #[strong] wallpapers,
                     move |result| {
                         if let Ok(folder) = result {
                             if let Some(path) = folder.path() {
                                 config.borrow_mut().wallpaper_dir = path.to_string_lossy().to_string();
                                 let _ = config.borrow().save();
-                                reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), None);
+                                reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
                             }
                         }
                     }
@@ -166,8 +177,57 @@ pub fn build_ui(app: &Application) {
         #[strong] flowbox,
         #[strong] status_label,
         #[strong] spinner,
+        #[strong] wallpapers,
         move |_| {
-            open_settings_dialog(&window, config.clone(), flowbox.clone(), status_label.clone(), spinner.clone());
+            open_settings_dialog(&window, config.clone(), flowbox.clone(), status_label.clone(), spinner.clone(), wallpapers.clone());
+        }
+    ));
+
+    random_btn.connect_clicked(clone!(
+        #[strong] wallpapers,
+        #[strong] config,
+        #[strong] status_label,
+        move |_| {
+            let list = wallpapers.borrow();
+            if list.is_empty() {
+                status_label.set_text("⚠ Tidak ada wallpaper untuk dipilih acak.");
+                return;
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as usize;
+            let path = list[nanos % list.len()].clone();
+            drop(list);
+
+            let cfg = config.borrow().clone();
+            status_label.set_text(&format!("Menerapkan {}...", path.display()));
+
+            glib::MainContext::default().spawn_local(clone!(
+                #[strong] status_label,
+                async move {
+                    let path_for_thread = path.clone();
+                    let result = gio::spawn_blocking(move || {
+                        awww::set_wallpaper(&path_for_thread, &cfg)
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(())) => {
+                            status_label.set_text(&format!(
+                                "✓ Wallpaper acak: {}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            status_label.set_text(&format!("⚠ Gagal set wallpaper: {}", e));
+                        }
+                        Err(_) => {
+                            status_label.set_text("⚠ Gagal set wallpaper (thread error).");
+                        }
+                    }
+                }
+            ));
         }
     ));
 
@@ -181,6 +241,7 @@ fn reload_grid(
     config: Rc<RefCell<Config>>,
     status_label: Rc<Label>,
     spinner: Rc<Spinner>,
+    wallpapers: Rc<RefCell<Vec<PathBuf>>>,
     query: Option<String>,
 ) {
     while let Some(child) = flowbox.first_child() {
@@ -199,6 +260,7 @@ fn reload_grid(
         #[strong] status_label,
         #[strong] spinner,
         #[strong] config,
+        #[strong] wallpapers,
         async move {
             let scan = gio::spawn_blocking(move || wallpaper::scan_wallpapers(&dir)).await;
 
@@ -228,6 +290,7 @@ fn reload_grid(
                         .unwrap_or(false)
                 });
             }
+            *wallpapers.borrow_mut() = filtered.clone();
             if filtered.is_empty() {
                 spinner.stop();
                 spinner.set_visible(false);
@@ -347,6 +410,7 @@ fn open_settings_dialog(
     flowbox: Rc<FlowBox>,
     status_label: Rc<Label>,
     spinner: Rc<Spinner>,
+    wallpapers: Rc<RefCell<Vec<PathBuf>>>,
 ) {
     let dialog = gtk4::Window::builder()
         .transient_for(parent)
@@ -416,6 +480,7 @@ fn open_settings_dialog(
         #[strong] flowbox,
         #[strong] status_label,
         #[strong] spinner,
+        #[strong] wallpapers,
         move |_| {
             {
                 let mut cfg = config.borrow_mut();
@@ -429,7 +494,7 @@ fn open_settings_dialog(
                 cfg.thumb_size = thumb_spin.value() as u32;
                 let _ = cfg.save();
             }
-            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), None);
+            reload_grid(flowbox.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
             dialog.close();
         }
     ));
