@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -92,4 +92,55 @@ pub fn check_binaries_available() -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn start_background_slideshow() -> Result<()> {
+    let exe = std::env::current_exe().context("Gagal menentukan path binary")?;
+
+    let child = Command::new(&exe)
+        .arg("--slideshow-bg")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()?;
+
+    let pid_path = Config::slideshow_pid_path()?;
+    fs::write(&pid_path, child.id().to_string())?;
+
+    Ok(())
+}
+
+pub fn stop_background_slideshow() -> Result<()> {
+    let pid_path = Config::slideshow_pid_path()?;
+    if pid_path.exists() {
+        let pid_str = fs::read_to_string(&pid_path)?;
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            let _ = Command::new("kill")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+    Ok(())
+}
+
+pub fn is_background_slideshow_running() -> bool {
+    let pid_path = match Config::slideshow_pid_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    if !pid_path.exists() {
+        return false;
+    }
+    let pid_str = match fs::read_to_string(&pid_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return false,
+    };
+    let pid: i32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    Path::new(&format!("/proc/{}", pid)).exists()
 }

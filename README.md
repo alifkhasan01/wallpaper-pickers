@@ -8,7 +8,7 @@ Wallpaper picker GUI (Rust + GTK4) buat Hyprland/Niri, set wallpaper lewat `awww
 - **Klik thumbnail** — langsung diterapkan lewat `awww img` dengan transisi
 - **Auto-start `awww-daemon`** — kalau belum jalan
 - **Search/filter** — cari by nama file (case-insensitive, real-time)
-- **Slideshow** — ganti wallpaper otomatis dengan interval bisa diatur
+- **Slideshow background** — toggle on/off, proses jalan di background meskipun aplikasi ditutup, interval bisa diatur di pengaturan
 - **Random wallpaper** — tombol shuffle di header bar
 - **Ganti folder** — via file picker
 - **Pengaturan lengkap** — tipe transisi, durasi, FPS, ukuran thumbnail, interval slideshow — tersimpan di `~/.config/wallpicker/config.json`
@@ -32,9 +32,10 @@ Wallpaper picker GUI (Rust + GTK4) buat Hyprland/Niri, set wallpaper lewat `awww
 ## CLI
 
 ```bash
-wallpicker                  # Buka GUI
-wallpicker --random         # Set wallpaper acak, langsung keluar
-wallpicker --set /path/file # Set wallpaper tertentu, langsung keluar
+wallpicker                         # Buka GUI
+wallpicker --random                # Set wallpaper acak, langsung keluar
+wallpicker --set /path/file        # Set wallpaper tertentu, langsung keluar
+wallpicker --slideshow-bg          # (internal) mode background slide otomatis
 ```
 
 ## Dependency sistem (Arch)
@@ -85,6 +86,15 @@ Di `~/.config/hypr/hyprland.conf`:
 exec-once = awww-daemon
 bind = $mainMod, W, exec, wallpicker
 ```
+
+## Background slideshow
+
+Slideshow otomatis jalan sebagai proses terpisah (`wallpicker --slideshow-bg`) agar tetap berjalan meskipun GUI ditutup.
+
+- **Toggle on** di GUI → spawn background process, PID disimpan di `~/.cache/wallpicker/slideshow.pid`
+- **Toggle off** → kill background process via PID
+- **Saat buka GUI lagi** → auto-detect kalau proses masih jalan
+- Background process re-read `config.json` tiap iterasi, jadi perubahan interval langsung efektif di siklus berikutnya
 
 ## Catatan
 

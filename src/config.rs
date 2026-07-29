@@ -63,6 +63,18 @@ impl Config {
         Ok(dir)
     }
 
+    pub fn wallpicker_cache_dir() -> Result<PathBuf> {
+        let dir = dirs::cache_dir()
+            .context("Gagal menemukan cache dir")?
+            .join("wallpicker");
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    pub fn slideshow_pid_path() -> Result<PathBuf> {
+        Ok(Self::wallpicker_cache_dir()?.join("slideshow.pid"))
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         if !path.exists() {

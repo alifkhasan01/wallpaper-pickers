@@ -57,8 +57,22 @@ fn main() -> gtk4::glib::ExitCode {
                     }
                 };
             }
+            "--slideshow-bg" => {
+                let cfg = match config::Config::load() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("⚠ Gagal load config: {e}");
+                        return gtk4::glib::ExitCode::FAILURE;
+                    }
+                };
+                if !cfg.slideshow_enabled {
+                    return gtk4::glib::ExitCode::SUCCESS;
+                }
+                run_slideshow_background(&cfg);
+                return gtk4::glib::ExitCode::SUCCESS;
+            }
             _ => {
-                eprintln!("Usage: wallpicker [--random | --set <path>]");
+                eprintln!("Usage: wallpicker [--random | --set <path> | --slideshow-bg]");
                 return gtk4::glib::ExitCode::FAILURE;
             }
         }
@@ -70,4 +84,34 @@ fn main() -> gtk4::glib::ExitCode {
     });
 
     app.run()
+}
+
+fn run_slideshow_background(_: &config::Config) {
+    loop {
+        let cfg = match config::Config::load() {
+            Ok(c) => c,
+            Err(_) => break,
+        };
+        if !cfg.slideshow_enabled {
+            break;
+        }
+        let interval_secs = cfg.slideshow_interval_minutes.max(1) as u64 * 60;
+
+        let files = match wallpaper::scan_wallpapers(&cfg.wallpaper_dir) {
+            Ok(f) if !f.is_empty() => f,
+            _ => {
+                std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+                continue;
+            }
+        };
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos() as usize;
+        let path = &files[nanos % files.len()];
+        let _ = awww::set_wallpaper(path, &cfg);
+
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+    }
 }
