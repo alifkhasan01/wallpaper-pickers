@@ -74,6 +74,63 @@ pub fn set_wallpaper(path: &Path, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Wallpaper yang sedang aktif — tanya langsung ke daemon via `awww query`,
+/// fallback ke cache `~/.cache/wallpaper/current` (ditulis saat set).
+pub fn get_current_wallpaper() -> Option<PathBuf> {
+    if let Ok(output) = Command::new("awww")
+        .arg("query")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(p) = extract_path(line) {
+                    let path = PathBuf::from(&p);
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: cache lokal yang ditulis write_cache()
+    if let Ok(s) = fs::read_to_string(cache_dir().join("current")) {
+        let s = s.trim();
+        if !s.is_empty() {
+            let path = PathBuf::from(s);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Ambil path absolut dari satu baris output `awww query`.
+/// Mendukung format `path=/x/y.jpg`, `"output with image /x/y.jpg"`, dll.
+fn extract_path(line: &str) -> Option<String> {
+    let candidate = match line.find("path=") {
+        Some(i) => line[i + 5..].to_string(),
+        None => line[line.find('/')?..].to_string(),
+    };
+
+    let candidate = candidate
+        .trim()
+        .trim_matches('"')
+        .trim_end_matches(',')
+        .trim_matches('"')
+        .to_string();
+
+    if candidate.is_empty() || !candidate.starts_with('/') {
+        return None;
+    }
+    Some(candidate)
+}
+
 pub fn check_binaries_available() -> Result<()> {
     for bin in ["awww", "awww-daemon"] {
         let found = Command::new("which")

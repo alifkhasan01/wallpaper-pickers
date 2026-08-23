@@ -6,6 +6,8 @@ Wallpaper picker GUI (Rust + GTK4) buat Hyprland/Niri, set wallpaper lewat `awww
 
 - **Grid thumbnail wallpaper** — di-cache di `~/.cache/wallpicker/thumbs`, pakai hash SHA-256 (path + mtime) biar auto-invalidasi kalau file berubah
 - **Klik thumbnail** — langsung diterapkan lewat `awww img` dengan transisi
+- **Navigasi keyboard** — panah untuk pindah seleksi di grid, `Enter` terapkan wallpaper terpilih, `Esc` bersihkan pencarian
+- **Indikator wallpaper aktif** — kartu yang sedang dipakai di-highlight (border biru), dibaca langsung dari `awww query` (fallback ke cache `~/.cache/wallpaper/current`), status bar juga nampilin nama file aktifnya
 - **Auto-start `awww-daemon`** — kalau belum jalan
 - **Search/filter** — cari by nama file (case-insensitive, real-time)
 - **Slideshow background** — toggle on/off, proses jalan di background meskipun aplikasi ditutup, interval bisa diatur di pengaturan
@@ -35,6 +37,7 @@ Wallpaper picker GUI (Rust + GTK4) buat Hyprland/Niri, set wallpaper lewat `awww
 wallpicker                         # Buka GUI
 wallpicker --random                # Set wallpaper acak, langsung keluar
 wallpicker --set /path/file        # Set wallpaper tertentu, langsung keluar
+wallpicker --current               # Cetak path wallpaper yang sedang aktif
 wallpicker --slideshow-bg          # (internal) mode background slide otomatis
 ```
 

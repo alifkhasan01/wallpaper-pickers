@@ -147,6 +147,18 @@ pub fn get_or_create_thumbnail(path: &Path, size: u32) -> Result<PathBuf> {
     Ok(thumb_path)
 }
 
+/// Bandingkan dua path secara toleran (fallback ke canonicalize
+/// kalau teksnya beda, mis. karena symlink atau `..`).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 pub fn build_entry(path: &Path, thumb_size: u32) -> Option<WallpaperEntry> {
     let thumb_path = get_or_create_thumbnail(path, thumb_size).ok()?;
     let file_name = path.file_name()?.to_string_lossy().to_string();

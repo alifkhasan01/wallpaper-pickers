@@ -57,6 +57,18 @@ fn main() -> gtk4::glib::ExitCode {
                     }
                 };
             }
+            "--current" => {
+                return match awww::get_current_wallpaper() {
+                    Some(p) => {
+                        println!("{}", p.display());
+                        gtk4::glib::ExitCode::SUCCESS
+                    }
+                    None => {
+                        eprintln!("Tidak ada wallpaper aktif.");
+                        gtk4::glib::ExitCode::FAILURE
+                    }
+                };
+            }
             "--slideshow-bg" => {
                 let cfg = match config::Config::load() {
                     Ok(c) => c,
@@ -72,7 +84,7 @@ fn main() -> gtk4::glib::ExitCode {
                 return gtk4::glib::ExitCode::SUCCESS;
             }
             _ => {
-                eprintln!("Usage: wallpicker [--random | --set <path> | --slideshow-bg]");
+                eprintln!("Usage: wallpicker [--random | --set <path> | --current | --slideshow-bg]");
                 return gtk4::glib::ExitCode::FAILURE;
             }
         }

@@ -1,10 +1,11 @@
 use glib::object::ObjectExt;
+use gtk4::gdk;
 use gtk4::glib::clone;
 use gtk4::prelude::*;
 use gtk4::{
     gio, glib, Align, Application, ApplicationWindow, Box as GtkBox, Button, Entry,
-    GridView, HeaderBar, Image, Label, ListItem, Orientation, Overlay, PolicyType,
-    ScrolledWindow, SignalListItemFactory, SingleSelection, SpinButton, Spinner,
+    EventControllerKey, GridView, HeaderBar, Image, Label, ListItem, Orientation, Overlay,
+    PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, SpinButton, Spinner,
     StringList, ToggleButton,
 };
 use std::cell::RefCell;
@@ -15,6 +16,16 @@ use std::rc::Rc;
 use crate::config::Config;
 use crate::wallpaper::{self, WallpaperEntry, WallpaperEntryObject};
 use crate::awww;
+
+/// State bersama yang dipakai di seluruh handler UI.
+struct GridCtx {
+    model: Rc<gio::ListStore>,
+    config: Rc<RefCell<Config>>,
+    status_label: Rc<Label>,
+    spinner: Rc<Spinner>,
+    wallpapers: Rc<RefCell<Vec<PathBuf>>>,
+    current_wp: Rc<RefCell<Option<PathBuf>>>,
+}
 
 pub fn build_ui(app: &Application) {
     let config = Rc::new(RefCell::new(Config::load().unwrap_or_default()));
@@ -62,6 +73,19 @@ pub fn build_ui(app: &Application) {
 
     window.set_titlebar(Some(&header));
 
+    // CSS untuk highlight wallpaper yang sedang aktif
+    let css_provider = gtk4::CssProvider::new();
+    css_provider.load_from_data(
+        ".wp-current { outline: 3px solid @theme_selected_bg_color; outline-offset: -3px; border-radius: 12px; }",
+    );
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &css_provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
     // ---------- Main content ----------
     let root = GtkBox::new(Orientation::Vertical, 0);
 
@@ -70,7 +94,7 @@ pub fn build_ui(app: &Application) {
         .vexpand(true)
         .build();
 
-    // Status bar bawah (dibuat dulu agar bisa di-capture factory closure)
+    // Status bar bawah
     let status_bar = GtkBox::new(Orientation::Horizontal, 8);
     status_bar.set_margin_top(6);
     status_bar.set_margin_bottom(6);
@@ -87,7 +111,16 @@ pub fn build_ui(app: &Application) {
 
     // GridView dengan widget recycling — hanya item terlihat yang dialokasikan
     let model: gio::ListStore = gio::ListStore::new::<WallpaperEntryObject>();
-    let model = Rc::new(model);
+
+    let ctx = Rc::new(GridCtx {
+        model: Rc::new(model),
+        config: config.clone(),
+        status_label: status_label.clone(),
+        spinner: spinner.clone(),
+        wallpapers: Rc::new(RefCell::new(Vec::new())),
+        // Wallpaper yang sedang aktif (dibaca dari awww / cache)
+        current_wp: Rc::new(RefCell::new(None)),
+    });
 
     let factory = SignalListItemFactory::new();
 
@@ -120,49 +153,63 @@ pub fn build_ui(app: &Application) {
     });
 
     // bind: dipanggil setiap kali item muncul/berubah di viewport
-    factory.connect_bind(|_, item| {
-        let list_item = item.downcast_ref::<ListItem>().unwrap();
+    factory.connect_bind(clone!(
+        #[strong] ctx,
+        move |_, item| {
+            let list_item = item.downcast_ref::<ListItem>().unwrap();
 
-        if let Some(entry) = list_item.item()
-            .as_ref()
-            .and_then(|o| o.downcast_ref::<WallpaperEntryObject>())
-        {
-            if let Some(child) = list_item.child() {
-                if let Some(card) = child.downcast_ref::<GtkBox>() {
-                    // card children: [button (overlay + image), label]
-                    let thumb_path = entry.thumb_path();
-                    if let Some(button) = card.first_child()
-                        .and_then(|c| c.downcast::<Button>().ok())
-                    {
-                        if let Some(overlay) = button.child()
-                            .and_then(|c| c.downcast::<Overlay>().ok())
+            if let Some(entry) = list_item.item()
+                .as_ref()
+                .and_then(|o| o.downcast_ref::<WallpaperEntryObject>())
+            {
+                let is_current = ctx
+                    .current_wp
+                    .borrow()
+                    .as_ref()
+                    .map(|c| wallpaper::same_path(c, &entry.full_path()))
+                    .unwrap_or(false);
+
+                if let Some(child) = list_item.child() {
+                    if let Some(card) = child.downcast_ref::<GtkBox>() {
+                        // card children: [button (overlay + image), label]
+                        let thumb_path = entry.thumb_path();
+                        if let Some(button) = card.first_child()
+                            .and_then(|c| c.downcast::<Button>().ok())
                         {
-                            if let Some(image) = overlay.child()
-                                .and_then(|c| c.downcast::<Image>().ok())
-                            {
-                                image.set_from_file(Some(&thumb_path));
+                            if is_current {
+                                button.add_css_class("wp-current");
+                            } else {
+                                button.remove_css_class("wp-current");
                             }
+                            if let Some(overlay) = button.child()
+                                .and_then(|c| c.downcast::<Overlay>().ok())
+                            {
+                                if let Some(image) = overlay.child()
+                                    .and_then(|c| c.downcast::<Image>().ok())
+                                {
+                                    image.set_from_file(Some(&thumb_path));
+                                }
+                            }
+                            // Simpan path di button untuk click handler
+                            let path_str = entry.full_path().to_string_lossy().to_string();
+                            unsafe { button.set_data("entry-path", path_str); }
                         }
-                        // Simpan path di button untuk click handler
-                        let path_str = entry.full_path().to_string_lossy().to_string();
-                        unsafe { button.set_data("entry-path", path_str); }
-                    }
-                    if let Some(second) = card.first_child()
-                        .and_then(|c| c.next_sibling())
-                    {
-                        if let Some(label) = second.downcast_ref::<Label>() {
-                            label.set_text(&entry.file_name());
+                        if let Some(second) = card.first_child()
+                            .and_then(|c| c.next_sibling())
+                        {
+                            if let Some(label) = second.downcast_ref::<Label>() {
+                                label.set_text(&entry.file_name());
+                            }
                         }
                     }
                 }
             }
         }
-    });
+    ));
 
     // Click handler pada setup (dipasang sekali, di-recycle bersama widget)
     factory.connect_setup(clone!(
-        #[strong] status_label,
-        #[strong] config,
+        #[strong] ctx,
         move |_, item| {
             let list_item = item.downcast_ref::<ListItem>().unwrap();
 
@@ -172,43 +219,16 @@ pub fn build_ui(app: &Application) {
                         .and_then(|c| c.downcast::<Button>().ok())
                     {
                         button.connect_clicked(clone!(
-                            #[strong] status_label,
-                            #[strong] config,
+                            #[strong] ctx,
                             move |btn| {
                                 // Ambil path dari data button (diset di bind)
                                 let path = unsafe {
                                     btn.steal_data::<String>("entry-path")
-                                        .map(|s| PathBuf::from(s))
+                                        .map(PathBuf::from)
                                 };
 
                                 if let Some(path) = path {
-                                    let cfg = config.borrow().clone();
-                                    status_label.set_text(&format!("Menerapkan {}...", path.display()));
-
-                                    glib::MainContext::default().spawn_local(clone!(
-                                        #[strong] status_label,
-                                        async move {
-                                            let path_for_thread = path.clone();
-                                            let result = gio::spawn_blocking(move || {
-                                                awww::set_wallpaper(&path_for_thread, &cfg)
-                                            }).await;
-
-                                            match result {
-                                                Ok(Ok(())) => {
-                                                    status_label.set_text(&format!(
-                                                        "✓ Wallpaper diset: {}",
-                                                        path.file_name().unwrap_or_default().to_string_lossy()
-                                                    ));
-                                                }
-                                                Ok(Err(e)) => {
-                                                    status_label.set_text(&format!("⚠ Gagal set wallpaper: {}", e));
-                                                }
-                                                Err(_) => {
-                                                    status_label.set_text("⚠ Gagal set wallpaper (thread error).");
-                                                }
-                                            }
-                                        }
-                                    ));
+                                    spawn_apply_wallpaper(path, ctx.clone());
                                 }
                             }
                         ));
@@ -218,12 +238,48 @@ pub fn build_ui(app: &Application) {
         }
     ));
 
-    let selection = SingleSelection::new(Some((*model).clone()));
+    let selection = SingleSelection::new(Some((*ctx.model).clone()));
+    let selection = Rc::new(selection);
     let grid_view = GridView::builder()
-        .model(&selection)
+        .model(selection.as_ref())
         .factory(&factory)
         .max_columns(6)
         .build();
+
+    // Grid bisa menerima fokus untuk navigasi keyboard
+    grid_view.set_focusable(true);
+
+    // Enter = terapkan wallpaper terpilih, Esc = bersihkan pencarian & balik ke grid.
+    // Panah kiri/kanan/atas/bawah ditangani native oleh GridView (pindah seleksi).
+    let key_ctrl = EventControllerKey::new();
+    key_ctrl.connect_key_pressed(clone!(
+        #[strong] ctx,
+        #[strong] selection,
+        #[strong] search_entry,
+        #[strong] grid_view,
+        move |_, keyval, _, _| {
+            match keyval {
+                gdk::Key::Return | gdk::Key::KP_Enter => {
+                    let pos = selection.selected();
+                    if let Some(obj) = ctx.model.item(pos) {
+                        if let Some(entry_obj) = obj.downcast_ref::<WallpaperEntryObject>() {
+                            spawn_apply_wallpaper(entry_obj.full_path(), ctx.clone());
+                        }
+                    }
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Escape => {
+                    if !search_entry.text().is_empty() {
+                        search_entry.set_text("");
+                    }
+                    grid_view.grab_focus();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        }
+    ));
+    grid_view.add_controller(key_ctrl);
 
     scrolled.set_child(Some(&grid_view));
     root.append(&scrolled);
@@ -231,68 +287,53 @@ pub fn build_ui(app: &Application) {
 
     window.set_child(Some(&root));
 
-    let wallpapers: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
-
     // Cek binary awww ada atau tidak, kasih tau di status bar kalau tidak ada
     if let Err(e) = awww::check_binaries_available() {
         status_label.set_text(&format!("⚠ {}", e));
     }
 
     // Muat grid pertama kali
-    reload_grid(
-        model.clone(),
-        config.clone(),
-        status_label.clone(),
-        spinner.clone(),
-        wallpapers.clone(),
-        None,
-    );
+    reload_grid(ctx.clone(), true, None);
+
+    // Enter di kolom pencarian → pindah fokus ke grid
+    search_entry.connect_activate(clone!(
+        #[strong] grid_view,
+        move |_| {
+            grid_view.grab_focus();
+        }
+    ));
 
     // Auto-start slideshow background process jika sebelumnya aktif
-    if config.borrow().slideshow_enabled {
-        if !awww::is_background_slideshow_running() {
-            if let Ok(pid_path) = Config::slideshow_pid_path() {
-                let _ = fs::remove_file(&pid_path);
-            }
-            match awww::start_background_slideshow() {
-                Ok(_) => status_label.set_text("✓ Slide otomatis berjalan (background)"),
-                Err(e) => status_label.set_text(&format!("⚠ Gagal mulai slide: {e}")),
-            }
+    if config.borrow().slideshow_enabled && !awww::is_background_slideshow_running() {
+        if let Ok(pid_path) = Config::slideshow_pid_path() {
+            let _ = fs::remove_file(&pid_path);
+        }
+        match awww::start_background_slideshow() {
+            Ok(_) => status_label.set_text("✓ Slide otomatis berjalan (background)"),
+            Err(e) => status_label.set_text(&format!("⚠ Gagal mulai slide: {e}")),
         }
     }
 
     // ---------- Signal handlers ----------
 
     refresh_btn.connect_clicked(clone!(
-        #[strong] model,
-        #[strong] config,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
+        #[strong] ctx,
         move |_| {
-            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+            reload_grid(ctx.clone(), true, None);
         }
     ));
 
     search_entry.connect_changed(clone!(
-        #[strong] model,
-        #[strong] config,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
+        #[strong] ctx,
         move |entry| {
             let query = entry.text().to_string();
-            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), Some(query));
+            reload_grid(ctx.clone(), false, Some(query));
         }
     ));
 
     folder_btn.connect_clicked(clone!(
         #[strong] window,
-        #[strong] model,
-        #[strong] config,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
+        #[strong] ctx,
         move |_| {
             let dialog = gtk4::FileDialog::builder()
                 .title("Pilih folder wallpaper")
@@ -302,17 +343,14 @@ pub fn build_ui(app: &Application) {
                 Some(&window),
                 gio::Cancellable::NONE,
                 clone!(
-                    #[strong] model,
-                    #[strong] config,
-                    #[strong] status_label,
-                    #[strong] spinner,
-                    #[strong] wallpapers,
+                    #[strong] ctx,
                     move |result| {
                         if let Ok(folder) = result {
                             if let Some(path) = folder.path() {
-                                config.borrow_mut().wallpaper_dir = path.to_string_lossy().to_string();
-                                let _ = config.borrow().save();
-                                reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+                                ctx.config.borrow_mut().wallpaper_dir =
+                                    path.to_string_lossy().to_string();
+                                let _ = ctx.config.borrow().save();
+                                reload_grid(ctx.clone(), true, None);
                             }
                         }
                     }
@@ -322,8 +360,8 @@ pub fn build_ui(app: &Application) {
     ));
 
     slideshow_btn.connect_toggled(clone!(
-        #[strong] config,
-        #[strong] status_label,
+        #[strong(rename_to = config)] ctx.config,
+        #[strong(rename_to = status_label)] ctx.status_label,
         move |btn| {
             let enabled = btn.is_active();
             if enabled {
@@ -346,114 +384,113 @@ pub fn build_ui(app: &Application) {
 
     settings_btn.connect_clicked(clone!(
         #[strong] window,
-        #[strong] model,
-        #[strong] config,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
+        #[strong] ctx,
         #[strong] slideshow_btn,
         move |_| {
-            open_settings_dialog(
-                &window, model.clone(), config.clone(), status_label.clone(),
-                spinner.clone(), wallpapers.clone(), slideshow_btn.clone(),
-            );
+            open_settings_dialog(&window, ctx.clone(), slideshow_btn.clone());
         }
     ));
 
     random_btn.connect_clicked(clone!(
-        #[strong] wallpapers,
-        #[strong] config,
-        #[strong] status_label,
+        #[strong] ctx,
         move |_| {
-            let list = wallpapers.borrow();
-            if list.is_empty() {
-                status_label.set_text("⚠ Tidak ada wallpaper untuk dipilih acak.");
-                return;
-            }
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos() as usize;
-            let path = list[nanos % list.len()].clone();
-            drop(list);
-
-            let cfg = config.borrow().clone();
-            status_label.set_text(&format!("Menerapkan {}...", path.display()));
-
-            glib::MainContext::default().spawn_local(clone!(
-                #[strong] status_label,
-                async move {
-                    let path_for_thread = path.clone();
-                    let result = gio::spawn_blocking(move || {
-                        awww::set_wallpaper(&path_for_thread, &cfg)
-                    })
-                    .await;
-
-                    match result {
-                        Ok(Ok(())) => {
-                            status_label.set_text(&format!(
-                                "✓ Wallpaper acak: {}",
-                                path.file_name().unwrap_or_default().to_string_lossy()
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            status_label.set_text(&format!("⚠ Gagal set wallpaper: {}", e));
-                        }
-                        Err(_) => {
-                            status_label.set_text("⚠ Gagal set wallpaper (thread error).");
-                        }
-                    }
+            let path = {
+                let list = ctx.wallpapers.borrow();
+                if list.is_empty() {
+                    None
+                } else {
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos() as usize;
+                    Some(list[nanos % list.len()].clone())
                 }
-            ));
+            };
+
+            match path {
+                Some(p) => spawn_apply_wallpaper(p, ctx.clone()),
+                None => ctx.status_label.set_text("⚠ Tidak ada wallpaper untuk dipilih acak."),
+            }
         }
     ));
 
+    gtk4::prelude::GtkWindowExt::set_focus(&window, Some(&grid_view));
     window.present();
 }
 
 const BATCH_SIZE: usize = 50;
 
-fn reload_grid(
-    model: Rc<gio::ListStore>,
-    config: Rc<RefCell<Config>>,
-    status_label: Rc<Label>,
-    spinner: Rc<Spinner>,
-    wallpapers: Rc<RefCell<Vec<PathBuf>>>,
-    query: Option<String>,
-) {
-    // Kosongkan model — GridView otomatis merespon perubahan
-    if model.n_items() > 0 {
-        let empty: &[WallpaperEntryObject] = &[];
-        model.splice(0, model.n_items(), empty);
-    }
-
-    let dir = config.borrow().wallpaper_dir.clone();
-    let thumb_size = config.borrow().thumb_size;
-
-    status_label.set_text("Memindai wallpaper...");
-    spinner.start();
-    spinner.set_visible(true);
+/// Terapkan wallpaper secara async, lalu update indikator "aktif"
+/// (highlight kartu di grid + status bar).
+fn spawn_apply_wallpaper(path: PathBuf, ctx: Rc<GridCtx>) {
+    let cfg = ctx.config.borrow().clone();
+    ctx.status_label
+        .set_text(&format!("Menerapkan {}...", path.display()));
 
     glib::MainContext::default().spawn_local(clone!(
-        #[strong] model,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
+        #[strong] path,
+        #[strong] ctx,
+        async move {
+            let path_for_thread = path.clone();
+            let result = gio::spawn_blocking(move || {
+                awww::set_wallpaper(&path_for_thread, &cfg)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {
+                    *ctx.current_wp.borrow_mut() = Some(path.clone());
+                    // Paksa rebind item terlihat agar highlight ikut pindah
+                    ctx.model.items_changed(0, ctx.model.n_items(), ctx.model.n_items());
+                    ctx.status_label.set_text(&format!(
+                        "✓ Wallpaper diset: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                }
+                Ok(Err(e)) => {
+                    ctx.status_label
+                        .set_text(&format!("⚠ Gagal set wallpaper: {}", e));
+                }
+                Err(_) => {
+                    ctx.status_label
+                        .set_text("⚠ Gagal set wallpaper (thread error).");
+                }
+            }
+        }
+    ));
+}
+
+fn reload_grid(ctx: Rc<GridCtx>, refresh_current: bool, query: Option<String>) {
+    // Kosongkan model — GridView otomatis merespon perubahan
+    if ctx.model.n_items() > 0 {
+        let empty: &[WallpaperEntryObject] = &[];
+        ctx.model.splice(0, ctx.model.n_items(), empty);
+    }
+
+    let dir = ctx.config.borrow().wallpaper_dir.clone();
+    let thumb_size = ctx.config.borrow().thumb_size;
+
+    ctx.status_label.set_text("Memindai wallpaper...");
+    ctx.spinner.start();
+    ctx.spinner.set_visible(true);
+
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong] ctx,
         async move {
             let scan = gio::spawn_blocking(move || wallpaper::scan_wallpapers(&dir)).await;
 
             let files = match scan {
                 Ok(Ok(f)) => f,
                 Ok(Err(e)) => {
-                    spinner.stop();
-                    spinner.set_visible(false);
-                    status_label.set_text(&format!("⚠ {}", e));
+                    ctx.spinner.stop();
+                    ctx.spinner.set_visible(false);
+                    ctx.status_label.set_text(&format!("⚠ {}", e));
                     return;
                 }
                 Err(_) => {
-                    spinner.stop();
-                    spinner.set_visible(false);
-                    status_label.set_text("⚠ Gagal scan folder.");
+                    ctx.spinner.stop();
+                    ctx.spinner.set_visible(false);
+                    ctx.status_label.set_text("⚠ Gagal scan folder.");
                     return;
                 }
             };
@@ -468,11 +505,11 @@ fn reload_grid(
                         .unwrap_or(false)
                 });
             }
-            *wallpapers.borrow_mut() = filtered.clone();
+            *ctx.wallpapers.borrow_mut() = filtered.clone();
             if filtered.is_empty() {
-                spinner.stop();
-                spinner.set_visible(false);
-                status_label.set_text("Tidak ada wallpaper ditemukan.");
+                ctx.spinner.stop();
+                ctx.spinner.set_visible(false);
+                ctx.status_label.set_text("Tidak ada wallpaper ditemukan.");
                 return;
             }
 
@@ -496,29 +533,39 @@ fn reload_grid(
                 loaded += entries.len();
 
                 for entry in &entries {
-                    model.append(&WallpaperEntryObject::new(entry));
+                    ctx.model.append(&WallpaperEntryObject::new(entry));
                 }
 
-                status_label.set_text(&format!("Memuat {}/{}...", loaded, total));
+                ctx.status_label.set_text(&format!("Memuat {}/{}...", loaded, total));
             }
 
-            spinner.stop();
-            spinner.set_visible(false);
-            status_label.set_text(&format!("{} wallpaper dimuat.", loaded));
+            ctx.spinner.stop();
+            ctx.spinner.set_visible(false);
+
+            // Deteksi wallpaper yang sedang aktif (baca dari awww/cache)
+            if refresh_current {
+                let cur = gio::spawn_blocking(awww::get_current_wallpaper)
+                    .await
+                    .unwrap_or(None);
+                *ctx.current_wp.borrow_mut() = cur;
+                ctx.model.items_changed(0, ctx.model.n_items(), ctx.model.n_items());
+            }
+
+            let active_txt = match ctx.current_wp.borrow().as_ref() {
+                Some(c) => format!(
+                    " — aktif: {}",
+                    c.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                None => String::new(),
+            };
+            ctx.status_label
+                .set_text(&format!("{} wallpaper dimuat.{}", loaded, active_txt));
         }
     ));
 }
 
 /// Dialog pengaturan transisi awww + ukuran thumbnail + slide.
-fn open_settings_dialog(
-    parent: &ApplicationWindow,
-    model: Rc<gio::ListStore>,
-    config: Rc<RefCell<Config>>,
-    status_label: Rc<Label>,
-    spinner: Rc<Spinner>,
-    wallpapers: Rc<RefCell<Vec<PathBuf>>>,
-    slideshow_btn: ToggleButton,
-) {
+fn open_settings_dialog(parent: &ApplicationWindow, ctx: Rc<GridCtx>, slideshow_btn: ToggleButton) {
     let dialog = gtk4::Window::builder()
         .transient_for(parent)
         .modal(true)
@@ -537,7 +584,7 @@ fn open_settings_dialog(
     let type_list = StringList::new(&types);
     let current_idx = types
         .iter()
-        .position(|t| *t == config.borrow().transition_type)
+        .position(|t| *t == ctx.config.borrow().transition_type)
         .unwrap_or(2) as u32;
 
     let type_row = GtkBox::new(Orientation::Horizontal, 8);
@@ -552,7 +599,7 @@ fn open_settings_dialog(
     let dur_row = GtkBox::new(Orientation::Horizontal, 8);
     dur_row.append(&Label::new(Some("Durasi (detik):")));
     let dur_spin = SpinButton::with_range(0.1, 5.0, 0.1);
-    dur_spin.set_value(config.borrow().transition_duration as f64);
+    dur_spin.set_value(ctx.config.borrow().transition_duration as f64);
     dur_spin.set_hexpand(true);
     dur_row.append(&dur_spin);
     content.append(&dur_row);
@@ -561,7 +608,7 @@ fn open_settings_dialog(
     let fps_row = GtkBox::new(Orientation::Horizontal, 8);
     fps_row.append(&Label::new(Some("FPS transisi:")));
     let fps_spin = SpinButton::with_range(24.0, 144.0, 1.0);
-    fps_spin.set_value(config.borrow().transition_fps as f64);
+    fps_spin.set_value(ctx.config.borrow().transition_fps as f64);
     fps_spin.set_hexpand(true);
     fps_row.append(&fps_spin);
     content.append(&fps_row);
@@ -570,7 +617,7 @@ fn open_settings_dialog(
     let thumb_row = GtkBox::new(Orientation::Horizontal, 8);
     thumb_row.append(&Label::new(Some("Ukuran thumbnail (px):")));
     let thumb_spin = SpinButton::with_range(100.0, 400.0, 20.0);
-    thumb_spin.set_value(config.borrow().thumb_size as f64);
+    thumb_spin.set_value(ctx.config.borrow().thumb_size as f64);
     thumb_spin.set_hexpand(true);
     thumb_row.append(&thumb_spin);
     content.append(&thumb_row);
@@ -579,7 +626,7 @@ fn open_settings_dialog(
     let slide_row = GtkBox::new(Orientation::Horizontal, 8);
     slide_row.append(&Label::new(Some("Interval slide (menit):")));
     let slide_spin = SpinButton::with_range(1.0, 120.0, 1.0);
-    slide_spin.set_value(config.borrow().slideshow_interval_minutes as f64);
+    slide_spin.set_value(ctx.config.borrow().slideshow_interval_minutes as f64);
     slide_spin.set_hexpand(true);
     slide_row.append(&slide_spin);
     content.append(&slide_row);
@@ -591,17 +638,13 @@ fn open_settings_dialog(
     dialog.set_child(Some(&content));
 
     save_btn.connect_clicked(clone!(
-        #[strong] config,
+        #[strong] ctx,
         #[strong] dialog,
-        #[strong] model,
-        #[strong] status_label,
-        #[strong] spinner,
-        #[strong] wallpapers,
         #[strong] slideshow_btn,
         move |_| {
             let interval_changed;
             {
-                let mut cfg = config.borrow_mut();
+                let mut cfg = ctx.config.borrow_mut();
                 let selected = type_dropdown.selected();
                 cfg.transition_type = types
                     .get(selected as usize)
@@ -615,7 +658,7 @@ fn open_settings_dialog(
                 cfg.slideshow_interval_minutes = new_interval;
                 let _ = cfg.save();
             }
-            reload_grid(model.clone(), config.clone(), status_label.clone(), spinner.clone(), wallpapers.clone(), None);
+            reload_grid(ctx.clone(), false, None);
 
             // Restart background process jika interval berubah dan slideshow aktif
             if interval_changed && slideshow_btn.is_active() {
