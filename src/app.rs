@@ -6,7 +6,7 @@ use gtk4::{
     gio, glib, Align, Application, ApplicationWindow, Box as GtkBox, Button, Entry,
     EventControllerKey, GridView, HeaderBar, Image, Label, ListItem, Orientation, Overlay,
     PolicyType, ScrolledWindow, SignalListItemFactory, SingleSelection, SpinButton, Spinner,
-    StringList, ToggleButton,
+    StringList, Switch, ToggleButton,
 };
 use std::cell::RefCell;
 use std::fs;
@@ -16,6 +16,7 @@ use std::rc::Rc;
 use crate::config::Config;
 use crate::wallpaper::{self, WallpaperEntry, WallpaperEntryObject};
 use crate::awww;
+use crate::notify;
 
 /// State bersama yang dipakai di seluruh handler UI.
 struct GridCtx {
@@ -290,6 +291,7 @@ pub fn build_ui(app: &Application) {
     // Cek binary awww ada atau tidak, kasih tau di status bar kalau tidak ada
     if let Err(e) = awww::check_binaries_available() {
         status_label.set_text(&format!("⚠ {}", e));
+        notify::notify_error("Binary Tidak Ditemukan", &e.to_string());
     }
 
     // Muat grid pertama kali
@@ -309,8 +311,14 @@ pub fn build_ui(app: &Application) {
             let _ = fs::remove_file(&pid_path);
         }
         match awww::start_background_slideshow() {
-            Ok(_) => status_label.set_text("✓ Slide otomatis berjalan (background)"),
-            Err(e) => status_label.set_text(&format!("⚠ Gagal mulai slide: {e}")),
+            Ok(_) => {
+                status_label.set_text("✓ Slide otomatis berjalan (background)");
+                notify::notify_info("Slide Otomatis", "Slide otomatis berjalan di background");
+            }
+            Err(e) => {
+                status_label.set_text(&format!("⚠ Gagal mulai slide: {e}"));
+                notify::notify_error("Gagal Mulai Slide", &e.to_string());
+            }
         }
     }
 
@@ -369,8 +377,14 @@ pub fn build_ui(app: &Application) {
                 config.borrow_mut().slideshow_enabled = true;
                 let _ = config.borrow().save();
                 match awww::start_background_slideshow() {
-                    Ok(_) => status_label.set_text("✓ Slide otomatis dimulai (background)"),
-                    Err(e) => status_label.set_text(&format!("⚠ Gagal mulai slide: {e}")),
+                    Ok(_) => {
+                        status_label.set_text("✓ Slide otomatis dimulai (background)");
+                        notify::notify_info("Slide Dimulai", "Slide otomatis dimulai di background");
+                    }
+                    Err(e) => {
+                        status_label.set_text(&format!("⚠ Gagal mulai slide: {e}"));
+                        notify::notify_error("Gagal Mulai Slide", &e.to_string());
+                    }
                 }
             } else {
                 btn.remove_css_class("suggested-action");
@@ -378,6 +392,7 @@ pub fn build_ui(app: &Application) {
                 let _ = config.borrow().save();
                 let _ = awww::stop_background_slideshow();
                 status_label.set_text("✓ Slide otomatis dihentikan");
+                notify::notify_info("Slide Dihentikan", "Slide otomatis telah dihentikan");
             }
         }
     ));
@@ -442,18 +457,19 @@ fn spawn_apply_wallpaper(path: PathBuf, ctx: Rc<GridCtx>) {
                     *ctx.current_wp.borrow_mut() = Some(path.clone());
                     // Paksa rebind item terlihat agar highlight ikut pindah
                     ctx.model.items_changed(0, ctx.model.n_items(), ctx.model.n_items());
-                    ctx.status_label.set_text(&format!(
-                        "✓ Wallpaper diset: {}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    ));
+                    let fname = path.file_name().unwrap_or_default().to_string_lossy();
+                    ctx.status_label.set_text(&format!("✓ Wallpaper diset: {}", fname));
+                    notify::notify_success("Wallpaper Diset", &format!("Berhasil: {}", fname));
                 }
                 Ok(Err(e)) => {
                     ctx.status_label
                         .set_text(&format!("⚠ Gagal set wallpaper: {}", e));
+                    notify::notify_error("Gagal Set Wallpaper", &e.to_string());
                 }
                 Err(_) => {
                     ctx.status_label
                         .set_text("⚠ Gagal set wallpaper (thread error).");
+                    notify::notify_error("Gagal Set Wallpaper", "Thread error");
                 }
             }
         }
@@ -631,6 +647,15 @@ fn open_settings_dialog(parent: &ApplicationWindow, ctx: Rc<GridCtx>, slideshow_
     slide_row.append(&slide_spin);
     content.append(&slide_row);
 
+    // Notifikasi toggle
+    let notif_row = GtkBox::new(Orientation::Horizontal, 8);
+    notif_row.append(&Label::new(Some("Notifikasi desktop:")));
+    let notif_switch = Switch::new();
+    notif_switch.set_active(ctx.config.borrow().notifications_enabled);
+    notif_switch.set_hexpand(true);
+    notif_row.append(&notif_switch);
+    content.append(&notif_row);
+
     let save_btn = Button::with_label("Simpan");
     save_btn.add_css_class("suggested-action");
     content.append(&save_btn);
@@ -641,6 +666,7 @@ fn open_settings_dialog(parent: &ApplicationWindow, ctx: Rc<GridCtx>, slideshow_
         #[strong] ctx,
         #[strong] dialog,
         #[strong] slideshow_btn,
+        #[strong] notif_switch,
         move |_| {
             let interval_changed;
             {
@@ -656,6 +682,7 @@ fn open_settings_dialog(parent: &ApplicationWindow, ctx: Rc<GridCtx>, slideshow_
                 let new_interval = slide_spin.value() as u32;
                 interval_changed = new_interval != cfg.slideshow_interval_minutes;
                 cfg.slideshow_interval_minutes = new_interval;
+                cfg.notifications_enabled = notif_switch.is_active();
                 let _ = cfg.save();
             }
             reload_grid(ctx.clone(), false, None);

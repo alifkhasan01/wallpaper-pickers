@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod awww;
+mod notify;
 mod wallpaper;
 
 use gtk4::prelude::*;
@@ -23,19 +24,25 @@ fn main() -> gtk4::glib::ExitCode {
                             .unwrap()
                             .subsec_nanos() as usize;
                         match awww::set_wallpaper(&files[nanos % files.len()], &cfg) {
-                            Ok(_) => gtk4::glib::ExitCode::SUCCESS,
+                            Ok(_) => {
+                                notify::notify_success("Wallpaper Acak", "Wallpaper acak berhasil diset");
+                                gtk4::glib::ExitCode::SUCCESS
+                            }
                             Err(e) => {
                                 eprintln!("⚠ {e}");
+                                notify::notify_error("Gagal Set Wallpaper", &e.to_string());
                                 gtk4::glib::ExitCode::FAILURE
                             }
                         }
                     }
                     Ok(_) => {
                         eprintln!("Tidak ada wallpaper di {dir}");
+                        notify::notify_error("Tidak Ada Wallpaper", &format!("Tidak ada wallpaper di {}", dir));
                         gtk4::glib::ExitCode::FAILURE
                     }
                     Err(e) => {
                         eprintln!("⚠ {e}");
+                        notify::notify_error("Gagal Scan", &e.to_string());
                         gtk4::glib::ExitCode::FAILURE
                     }
                 };
@@ -50,9 +57,13 @@ fn main() -> gtk4::glib::ExitCode {
                 };
                 let cfg = config::Config::load().unwrap_or_default();
                 return match awww::set_wallpaper(std::path::Path::new(path), &cfg) {
-                    Ok(_) => gtk4::glib::ExitCode::SUCCESS,
+                    Ok(_) => {
+                        notify::notify_success("Wallpaper Diset", &format!("Berhasil: {}", path));
+                        gtk4::glib::ExitCode::SUCCESS
+                    }
                     Err(e) => {
                         eprintln!("⚠ {e}");
+                        notify::notify_error("Gagal Set Wallpaper", &e.to_string());
                         gtk4::glib::ExitCode::FAILURE
                     }
                 };
@@ -122,7 +133,12 @@ fn run_slideshow_background(_: &config::Config) {
             .unwrap()
             .subsec_nanos() as usize;
         let path = &files[nanos % files.len()];
-        let _ = awww::set_wallpaper(path, &cfg);
+        if let Err(e) = awww::set_wallpaper(path, &cfg) {
+            notify::notify_error("Slide Gagal", &e.to_string());
+        } else {
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+            notify::notify_info("Slide Otomatis", &format!("Wallpaper: {}", fname));
+        }
 
         std::thread::sleep(std::time::Duration::from_secs(interval_secs));
     }

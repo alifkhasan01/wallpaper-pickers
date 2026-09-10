@@ -22,6 +22,8 @@ pub struct Config {
     pub slideshow_enabled: bool,
     /// Interval slide (menit)
     pub slideshow_interval_minutes: u32,
+    /// Notifikasi desktop aktif/nonaktif
+    pub notifications_enabled: bool,
 }
 
 impl Default for Config {
@@ -41,6 +43,7 @@ impl Default for Config {
             columns: 4,
             slideshow_enabled: false,
             slideshow_interval_minutes: 5,
+            notifications_enabled: true,
         }
     }
 }
