@@ -15,7 +15,7 @@ fn cache_dir() -> PathBuf {
         .join("wallpaper")
 }
 
-fn write_cache(path: &Path) -> Result<()> {
+pub fn write_cache(path: &Path) -> Result<()> {
     let dir = cache_dir();
     fs::create_dir_all(&dir)?;
 
@@ -72,6 +72,28 @@ pub fn set_wallpaper(path: &Path, cfg: &Config) -> Result<()> {
     write_cache(path)?;
 
     Ok(())
+}
+
+/// Kirim perintah `awww img` tanpa menunggu selesai (fire-and-forget).
+/// Kembalikan child handle agar pemanggil bisa `.wait()` nanti jika perlu.
+/// Cocok untuk hide-window-saat-animasi: spawn → hide → tunggu transisi → show.
+pub fn spawn_wallpaper(path: &Path, cfg: &Config) -> Result<std::process::Child> {
+    ensure_daemon_running()?;
+
+    let child = Command::new("awww")
+        .arg("img")
+        .arg(path)
+        .arg("--transition-type")
+        .arg(&cfg.transition_type)
+        .arg("--transition-duration")
+        .arg(cfg.transition_duration.to_string())
+        .arg("--transition-fps")
+        .arg(cfg.transition_fps.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    Ok(child)
 }
 
 /// Wallpaper yang sedang aktif — tanya langsung ke daemon via `awww query`,

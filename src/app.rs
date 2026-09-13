@@ -26,6 +26,7 @@ struct GridCtx {
     spinner: Rc<Spinner>,
     wallpapers: Rc<RefCell<Vec<PathBuf>>>,
     current_wp: Rc<RefCell<Option<PathBuf>>>,
+    window: ApplicationWindow,
 }
 
 pub fn build_ui(app: &Application) {
@@ -121,6 +122,7 @@ pub fn build_ui(app: &Application) {
         wallpapers: Rc::new(RefCell::new(Vec::new())),
         // Wallpaper yang sedang aktif (dibaca dari awww / cache)
         current_wp: Rc::new(RefCell::new(None)),
+        window: window.clone(),
     });
 
     let factory = SignalListItemFactory::new();
@@ -250,9 +252,18 @@ pub fn build_ui(app: &Application) {
     // Grid bisa menerima fokus untuk navigasi keyboard
     grid_view.set_focusable(true);
 
+    scrolled.set_child(Some(&grid_view));
+    root.append(&scrolled);
+    root.append(&status_bar);
+
+    window.set_child(Some(&root));
+
     // Enter = terapkan wallpaper terpilih, Esc = bersihkan pencarian & balik ke grid.
-    // Panah kiri/kanan/atas/bawah ditangani native oleh GridView (pindah seleksi).
+    // Controller dipasang di level window dengan fase Capture agar Enter bekerja
+    // dari widget manapun yang sedang fokus (search bar, tombol, dll).
+    // Panah kiri/kanan/atas/bawah tetap ditangani native oleh GridView.
     let key_ctrl = EventControllerKey::new();
+    key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
     key_ctrl.connect_key_pressed(clone!(
         #[strong] ctx,
         #[strong] selection,
@@ -261,6 +272,12 @@ pub fn build_ui(app: &Application) {
         move |_, keyval, _, _| {
             match keyval {
                 gdk::Key::Return | gdk::Key::KP_Enter => {
+                    // Jika fokus ada di search entry, pindahkan ke grid saja
+                    // (biarkan search_entry.connect_activate menangani seperti biasa)
+                    if search_entry.has_focus() {
+                        grid_view.grab_focus();
+                        return glib::Propagation::Stop;
+                    }
                     let pos = selection.selected();
                     if let Some(obj) = ctx.model.item(pos) {
                         if let Some(entry_obj) = obj.downcast_ref::<WallpaperEntryObject>() {
@@ -280,13 +297,7 @@ pub fn build_ui(app: &Application) {
             }
         }
     ));
-    grid_view.add_controller(key_ctrl);
-
-    scrolled.set_child(Some(&grid_view));
-    root.append(&scrolled);
-    root.append(&status_bar);
-
-    window.set_child(Some(&root));
+    window.add_controller(key_ctrl);
 
     // Cek binary awww ada atau tidak, kasih tau di status bar kalau tidak ada
     if let Err(e) = awww::check_binaries_available() {
@@ -439,6 +450,9 @@ const BATCH_SIZE: usize = 50;
 /// (highlight kartu di grid + status bar).
 fn spawn_apply_wallpaper(path: PathBuf, ctx: Rc<GridCtx>) {
     let cfg = ctx.config.borrow().clone();
+    // Durasi transisi dalam ms — window muncul kembali setelah animasi selesai.
+    let transition_ms = (cfg.transition_duration * 1000.0) as u64;
+
     ctx.status_label
         .set_text(&format!("Menerapkan {}...", path.display()));
 
@@ -446,30 +460,61 @@ fn spawn_apply_wallpaper(path: PathBuf, ctx: Rc<GridCtx>) {
         #[strong] path,
         #[strong] ctx,
         async move {
-            let path_for_thread = path.clone();
-            let result = gio::spawn_blocking(move || {
-                awww::set_wallpaper(&path_for_thread, &cfg)
+            // 1. Spawn awww (non-blocking) — animasi sudah mulai berjalan.
+            let spawn_result = gio::spawn_blocking({
+                let path = path.clone();
+                let cfg = cfg.clone();
+                move || awww::spawn_wallpaper(&path, &cfg)
             })
             .await;
 
+            // 2. Baru hide window — animasi sudah di tangan compositor,
+            //    window menghilang tanpa menghalangi transisi.
+            ctx.window.set_visible(false);
+
+            // 3. Tunggu seluruh durasi transisi agar animasi tampil penuh.
+            glib::timeout_future(std::time::Duration::from_millis(transition_ms)).await;
+
+            // 4. Collect hasil awww (wait child) di thread terpisah.
+            let result: anyhow::Result<()> = match spawn_result {
+                Ok(Ok(mut child)) => gio::spawn_blocking({
+                    let path = path.clone();
+                    move || {
+                        // Ambil stderr sebelum wait() mengkonsumsi child
+                        use std::io::Read;
+                        let mut stderr_out = String::new();
+                        if let Some(mut e) = child.stderr.take() {
+                            let _ = e.read_to_string(&mut stderr_out);
+                        }
+                        let status = child.wait()?;
+                        if !status.success() {
+                            anyhow::bail!("awww gagal: {}", stderr_out.trim());
+                        }
+                        awww::write_cache(&path)
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("thread error"))),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(anyhow::anyhow!("spawn_blocking error")),
+            };
+
+            // 5. Tampilkan window kembali.
+            ctx.window.set_visible(true);
+            ctx.window.present();
+
             match result {
-                Ok(Ok(())) => {
+                Ok(()) => {
                     *ctx.current_wp.borrow_mut() = Some(path.clone());
-                    // Paksa rebind item terlihat agar highlight ikut pindah
                     ctx.model.items_changed(0, ctx.model.n_items(), ctx.model.n_items());
                     let fname = path.file_name().unwrap_or_default().to_string_lossy();
                     ctx.status_label.set_text(&format!("✓ Wallpaper diset: {}", fname));
                     notify::notify_success("Wallpaper Diset", &format!("Berhasil: {}", fname));
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     ctx.status_label
                         .set_text(&format!("⚠ Gagal set wallpaper: {}", e));
                     notify::notify_error("Gagal Set Wallpaper", &e.to_string());
-                }
-                Err(_) => {
-                    ctx.status_label
-                        .set_text("⚠ Gagal set wallpaper (thread error).");
-                    notify::notify_error("Gagal Set Wallpaper", "Thread error");
                 }
             }
         }
